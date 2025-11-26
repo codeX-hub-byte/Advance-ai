@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FocusAI: Enhanced School Focus Detection</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+    <style>
+        body { background-color: #f6f7fb; color: #1e293b; font-family: "Segoe UI", sans-serif; }
+        canvas { width: 100%; height: 100%; object-fit: cover; border: 2px solid #d0d6e2; border-radius: 6px; }
+        input[type=range] { accent-color: #2563eb; }
+
+        /* Custom Styles */
+        .school-header { background-color: #1e3a8a; border-bottom: 3px solid #172554; }
+        .hud-panel { background: #ffffff; border: 1px solid #d7dce3; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+        .school-footer { background-color: #e2e8f0; color: #475569; }
+
+        /* UI Status Colors */
+        .focused-text { color: #059669 !important; }
+        .warning-text { color: #ca8a04 !important; }
+        .danger-text  { color: #dc2626 !important; }
+
+        /* Splash and Loader */
+        #splash-screen {
+            background-color: #0d1222; /* Dark background from logo */
+            transition: opacity 0.5s ease-out;
+        }
+        #loader { background: rgba(255,255,255,0.92); }
+        #loader h2 { color: #1e3a8a; }
+        #loader p { color: #475569; }
+    </style>
+</head>
+
+<body class="h-screen flex flex-col overflow-hidden">
+
+<div id="splash-screen" class="absolute inset-0 flex flex-col items-center justify-center z-50">
+    <img src="1000582660.jpg" alt="FOCUS AI Logo" class="w-64 h-auto">
+</div>
+
+<div class="school-header p-4 flex flex-wrap justify-between items-center gap-4">
+    <div>
+        <h1 class="text-xl font-bold text-white tracking-widest">FOCUS<span class="text-yellow-300">AI</span></h1>
+        <p class="text-xs text-blue-200">School Activity Attention Tracking (V2)</p>
+    </div>
+
+    <div class="flex items-center gap-4 bg-white px-4 py-2 rounded-lg shadow hud-panel">
+        <label class="text-xs font-bold text-slate-700">STRICTNESS:</label>
+        <input id="sensitivity" type="range" min="10" max="90" value="50" class="w-32 h-1">
+        <span id="senseVal" class="text-xs font-mono text-blue-700">50%</span>
+    </div>
+
+    <div class="flex gap-6">
+        <div class="text-center">
+            <div class="text-[10px] text-blue-100 uppercase">Students</div>
+            <div id="countDisplay" class="text-2xl font-bold text-white leading-none">0</div>
+        </div>
+        <div class="text-center">
+            <div class="text-[10px] text-blue-100 uppercase">Focus Level</div>
+            <div id="focusDisplay" class="text-2xl font-bold text-white leading-none">--</div>
+        </div>
+    </div>
+
+    <button id="initBtn"
+        onclick="initSystem()"
+        class="bg-yellow-400 hover:bg-yellow-300 text-black px-6 py-2 rounded font-bold text-sm transition shadow">
+        START SYSTEM
+    </button>
+</div>
+
+<div class="relative flex-1 bg-white w-full flex items-center justify-center overflow-hidden">
+    <video id="video" class="hidden" playsinline></video>
+    <canvas id="canvas"></canvas>
+
+    <div id="loader" class="absolute inset-0 flex flex-col items-center justify-center z-30 hidden">
+        <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <h2 class="text-xl font-bold">LOADING AI MODEL</h2>
+        <p class="text-sm mt-2">MoveNet Multi-Person Loading…</p>
+    </div>
+</div>
+
+<div class="school-footer p-2 text-[10px] flex justify-center gap-6 border-t border-slate-300">
+    <span class="flex items-center gap-1">
+        <div class="w-2 h-2 bg-green-500 rounded-full"></div> Focused
+    </span>
+    <span class="flex items-center gap-1">
+        <div class="w-2 h-2 bg-red-500 rounded-full"></div> Distracted
+    </span>
+</div>
+
+<script>
+    // === DOM Elements ===
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const loader = document.getElementById("loader");
+    const initBtn = document.getElementById("initBtn");
+    const countDisplay = document.getElementById("countDisplay");
+    const focusDisplay = document.getElementById("focusDisplay");
+    const senseSlider = document.getElementById("sensitivity");
+    const senseVal = document.getElementById("senseVal");
+    const splashScreen = document.getElementById("splash-screen");
+
+    // === Configuration ===
+    let detector;
+    let isRunning = false;
+    // Frames below threshold to be considered distracted (~1 second at 30 FPS)
+    const DISTRACTION_THRESHOLD_FRAMES = 30; 
+    // Exponential smoothing factor for overall focus calculation
+    const ALPHA = 0.25; 
+
+    // === State ===
+    let personTrackers = {}; // { 'id': { distractionFrames: 0 } }
+    let STRICTNESS_THRESHOLD = 0.5; // Initial value
+    let smoothFocus = 0; // Smoothed overall focus percentage
+
+    // === Initialization & UI Handlers ===
+
+    // Handle Strictness Slider Input
+    senseSlider.oninput = (e) => {
+        STRICTNESS_THRESHOLD = e.target.value / 100;
+        senseVal.innerText = e.target.value + "%";
+    };
+
+    // 3-Second Logo Splash Screen (New)
+    setTimeout(() => {
+        splashScreen.style.opacity = '0';
+        setTimeout(() => splashScreen.classList.add('hidden'), 500); // Hide after transition
+    }, 3000); // 3000 milliseconds = 3 seconds
+
+    // Initialize System (Webcam & AI Model Loading)
+    async function initSystem() {
+        if (isRunning) return;
+        initBtn.disabled = true;
+        loader.classList.remove("hidden");
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720, facingMode: "user" }
+            });
+
+            video.srcObject = stream;
+            await new Promise(res => video.onloadedmetadata = res);
+            video.play();
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            // MoveNet Multi-Person Model Setup
+            detector = await poseDetection.createDetector(
+                poseDetection.SupportedModels.MoveNet,
+                {
+                    modelType: poseDetection.movenet.modelType.MULTIPOSE_THUNDER,
+                    enableSmoothing: true,
+                    minPoseScore: 0.30,
+                    trackerType: poseDetection.TrackerType.BoundingBox,
+                    trackerConfig: {
+                        maxTracks: 20,
+                        maxAge: 1000,
+                        minSimilarity: 0.15
+                    }
+                }
+            );
+
+            loader.classList.add("hidden");
+            initBtn.innerText = "SCANNING...";
+            initBtn.classList.replace("bg-yellow-400", "bg-green-500");
+            isRunning = true;
+
+            renderLoop(); // Start processing
+        } catch (err) {
+            alert("Error accessing webcam or loading model: " + err.message);
+            loader.classList.add("hidden");
+            initBtn.disabled = false;
+        }
+    }
+
+    // === Core Pose Detection and Rendering ===
+
+    // Main rendering loop
+    async function renderLoop() {
+        if (!isRunning) return;
+
+        const poses = await detector.estimatePoses(video, {
+            maxPoses: 20,
+            flipHorizontal: false,
+            multiPersonDecodingMethod: "greedy"
+        });
+
+        drawResults(poses);
+        requestAnimationFrame(renderLoop);
+    }
+
+    // New, more accurate focus detection logic (Shoulder-Nose-Hip)
+    function isFocused(pose, STRICTNESS_THRESHOLD) {
+        // --- 1. Get Keypoints & Ensure Minimum Confidence ---
+        const keypoints = pose.keypoints.reduce((acc, k) => { acc[k.name] = k; return acc; }, {});
+        const { nose, left_shoulder, right_shoulder, left_hip, right_hip } = keypoints;
+
+        const minScore = 0.4;
+        if (!(nose && left_shoulder && right_shoulder && left_hip && right_hip && 
+              nose.score > minScore && left_shoulder.score > minScore && right_shoulder.score > minScore && 
+              left_hip.score > minScore && right_hip.score > minScore)) {
+            return false; // Not enough reliable keypoints
+        }
+
+        // --- 2. Calculate Reference Points ---
+        const shoulderCenter = { x: (left_shoulder.x + right_shoulder.x) / 2, y: (left_shoulder.y + right_shoulder.y) / 2 };
+        const hipCenter = { x: (left_hip.x + right_hip.x) / 2, y: (left_hip.y + right_hip.y) / 2 };
+        const shoulderWidth = Math.abs(left_shoulder.x - right_shoulder.x);
+
+        // --- 3. Body Alignment (Checking for turning away) ---
+        // If the hip center is too far horizontally from the shoulder center, the student is likely twisted/turned.
+        const bodyTwistThreshold = shoulderWidth * 0.4; 
+        if (Math.abs(shoulderCenter.x - hipCenter.x) > bodyTwistThreshold) {
+            return false; // Body is turned away
+        }
+
+        // --- 4. Head Down (Reading/Writing Focus) ---
+        // If nose is significantly below the shoulder line
+        const headDownOffset = nose.y - shoulderCenter.y;
+        if (headDownOffset > shoulderWidth * 0.45) {
+            return true; 
+        }
+
+        // --- 5. Head Forward (Board/Teacher Focus) ---
+        // Horizontal distance from nose to the shoulder center line
+        const noseXOffset = Math.abs(nose.x - shoulderCenter.x);
+        
+        // Strictness calculation: Low STRICTNESS (0.1) -> large allowedOffset. High STRICTNESS (0.9) -> small allowedOffset.
+        // We want the allowed offset to shrink as strictness increases.
+        // Formula: shoulderWidth * (Max allowed factor - (STRICTNESS * Reduction factor))
+        const allowedOffset = shoulderWidth * (0.3 - STRICTNESS_THRESHOLD * 0.25); 
+
+        if (noseXOffset < allowedOffset) {
+            return true;
+        }
+
+        // --- 6. Otherwise, Distracted (e.g., Head far Sideways) ---
+        return false;
+    }
+
+
+    function drawResults(poses) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        let focusedCount = 0;
+        let total = 0;
+        let currentTrackedIds = new Set();
+
+        poses.forEach(pose => {
+            if (pose.score < 0.30 || !pose.id) return; 
+            total++;
+
+            const trackId = pose.id;
+            currentTrackedIds.add(trackId);
+
+            // Initialize tracker if new person
+            if (!personTrackers[trackId]) {
+                personTrackers[trackId] = { distractionFrames: 0 };
+            }
+
+            const isInstantlyFocused = isFocused(pose, STRICTNESS_THRESHOLD);
+
+            // Update tracker state (Time-based smoothing)
+            if (isInstantlyFocused) {
+                personTrackers[trackId].distractionFrames = 0;
+            } else {
+                personTrackers[trackId].distractionFrames++;
+            }
+
+            // Apply time-based threshold
+            const isSustainedFocused = personTrackers[trackId].distractionFrames < DISTRACTION_THRESHOLD_FRAMES;
+
+            if (isSustainedFocused) focusedCount++;
+
+            // Draw visual cues
+            const color = isSustainedFocused ? "#059669" : "#dc2626";
+
+            const nose = pose.keypoints.find(k => k.name === "nose");
+            const ls = pose.keypoints.find(k => k.name === "left_shoulder");
+            const rs = pose.keypoints.find(k => k.name === "right_shoulder");
+
+
+            if (nose) {
+                // Draw a circle around the head
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.arc(nose.x, nose.y, 40, 0, 2 * Math.PI);
+                ctx.stroke();
+
+                // Display status text
+                ctx.fillStyle = color;
+                ctx.font = "bold 16px Arial";
+                const statusText = isSustainedFocused ? "FOCUSED" : "DISTRACTED";
+                ctx.fillText(statusText, nose.x - 45, nose.y - 50);
+            }
+
+            // Draw a line connecting the shoulders (to show pose orientation)
+            if (ls && rs) {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(ls.x, ls.y);
+                ctx.lineTo(rs.x, rs.y);
+                ctx.stroke();
+            }
+        });
+
+        // Clean up trackers for people who left the frame
+        Object.keys(personTrackers).forEach(id => {
+            if (!currentTrackedIds.has(id)) {
+                delete personTrackers[id];
+            }
+        });
+
+        // Update UI
+        countDisplay.innerText = total;
+
+        const rawPct = total > 0 ? (focusedCount / total) : 0;
+        // Apply exponential smoothing for a stable focus reading
+        smoothFocus = smoothFocus * (1 - ALPHA) + rawPct * ALPHA; 
+        const pct = Math.round(smoothFocus * 100);
+
+        focusDisplay.innerText = pct + "%";
+
+        // Update Focus Level color class
+        if (pct > 80) focusDisplay.className = "text-2xl font-bold focused-text";
+        else if (pct > 50) focusDisplay.className = "text-2xl font-bold warning-text";
+        else focusDisplay.className = "text-2xl font-bold danger-text";
+    }
+</script>
+
+</body>
+</html>
