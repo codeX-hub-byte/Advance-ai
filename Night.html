@@ -1,0 +1,256 @@
+
+</body></html><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Adobe Exhibit: School Focus Detection</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- TensorFlow + MoveNet -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+    <style>
+        body { background-color: #f6f7fb; color: #1e293b; font-family: "Segoe UI", sans-serif; }
+        canvas { width: 100%; height: 100%; object-fit: cover; border: 2px solid #d0d6e2; border-radius: 6px; }
+        input[type=range] { accent-color: #2563eb; }
+
+        .school-header { background-color: #1e3a8a; border-bottom: 3px solid #172554; }
+        .hud-panel { background: #ffffff; border: 1px solid #d7dce3; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+        .school-footer { background-color: #e2e8f0; color: #475569; }
+
+        #loader { background: rgba(255,255,255,0.92); }
+        #loader h2 { color: #1e3a8a; }
+        #loader p { color: #475569; }
+
+        .focused-text { color: #059669 !important; }
+        .warning-text { color: #ca8a04 !important; }
+        .danger-text  { color: #dc2626 !important; }
+    </style>
+</head>
+
+<body class="h-screen flex flex-col overflow-hidden">
+
+<!-- HEADER -->
+<div class="school-header p-4 flex flex-wrap justify-between items-center gap-4">
+    <div>
+        <h1 class="text-xl font-bold text-white tracking-widest">FOCUS<span class="text-yellow-300">AI</span></h1>
+        <p class="text-xs text-blue-200">School Activity Attention Tracking</p>
+    </div>
+
+    <!-- Sensitivity Slider -->
+    <div class="flex items-center gap-4 bg-white px-4 py-2 rounded-lg shadow hud-panel">
+        <label class="text-xs font-bold text-slate-700">STRICTNESS:</label>
+        <input id="sensitivity" type="range" min="10" max="90" value="50" class="w-32 h-1">
+        <span id="senseVal" class="text-xs font-mono text-blue-700">50%</span>
+    </div>
+
+    <div class="flex gap-6">
+        <div class="text-center">
+            <div class="text-[10px] text-blue-100 uppercase">Students</div>
+            <div id="countDisplay" class="text-2xl font-bold text-white leading-none">0</div>
+        </div>
+        <div class="text-center">
+            <div class="text-[10px] text-blue-100 uppercase">Focus Level</div>
+            <div id="focusDisplay" class="text-2xl font-bold text-white leading-none">--</div>
+        </div>
+    </div>
+
+    <button id="initBtn"
+        onclick="initSystem()"
+        class="bg-yellow-400 hover:bg-yellow-300 text-black px-6 py-2 rounded font-bold text-sm transition shadow">
+        START SYSTEM
+    </button>
+</div>
+
+<!-- VIDEO + CANVAS -->
+<div class="relative flex-1 bg-white w-full flex items-center justify-center overflow-hidden">
+    <video id="video" class="hidden" playsinline></video>
+    <canvas id="canvas"></canvas>
+
+    <!-- Loader -->
+    <div id="loader" class="absolute inset-0 flex flex-col items-center justify-center z-30 hidden">
+        <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <h2 class="text-xl font-bold">LOADING AI MODEL</h2>
+        <p class="text-sm mt-2">MoveNet Multi-Person Loading…</p>
+    </div>
+</div>
+
+<!-- FOOTER -->
+<div class="school-footer p-2 text-[10px] flex justify-center gap-6 border-t border-slate-300">
+    <span class="flex items-center gap-1">
+        <div class="w-2 h-2 bg-green-500 rounded-full"></div> Focused
+    </span>
+    <span class="flex items-center gap-1">
+        <div class="w-2 h-2 bg-red-500 rounded-full"></div> Distracted
+    </span>
+</div>
+
+<!-- JS LOGIC -->
+<script>
+    let detector;
+    let isRunning = false;
+
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const loader = document.getElementById("loader");
+    const initBtn = document.getElementById("initBtn");
+
+    const countDisplay = document.getElementById("countDisplay");
+    const focusDisplay = document.getElementById("focusDisplay");
+
+    const senseSlider = document.getElementById("sensitivity");
+    const senseVal = document.getElementById("senseVal");
+
+    let STRICTNESS_THRESHOLD = 0.5;
+    senseSlider.oninput = (e) => {
+        STRICTNESS_THRESHOLD = e.target.value / 100;
+        senseVal.innerText = e.target.value + "%";
+    };
+
+    // Exponential smoothing
+    let smoothFocus = 0;
+    const ALPHA = 0.25;
+
+    async function initSystem() {
+        if (isRunning) return;
+        initBtn.disabled = true;
+        loader.classList.remove("hidden");
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720, facingMode: "user" }
+            });
+
+            video.srcObject = stream;
+            await new Promise(res => video.onloadedmetadata = res);
+            video.play();
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            detector = await poseDetection.createDetector(
+                poseDetection.SupportedModels.MoveNet,
+                {
+                    modelType: poseDetection.movenet.modelType.MULTIPOSE_THUNDER,
+                    enableSmoothing: true,
+                    minPoseScore: 0.30,
+                    trackerType: poseDetection.TrackerType.BoundingBox,
+                    trackerConfig: {
+                        maxTracks: 20,
+                        maxAge: 1000,
+                        minSimilarity: 0.15
+                    }
+                }
+            );
+
+            loader.classList.add("hidden");
+            initBtn.innerText = "SCANNING...";
+            initBtn.classList.replace("bg-yellow-400", "bg-green-500");
+            isRunning = true;
+
+            renderLoop();
+
+        } catch (err) {
+            alert(err.message);
+            loader.classList.add("hidden");
+            initBtn.disabled = false;
+        }
+    }
+
+    async function renderLoop() {
+        if (!isRunning) return;
+
+        const poses = await detector.estimatePoses(
+            video,
+            {
+                maxPoses: 20,
+                flipHorizontal: false,
+                multiPersonDecodingMethod: "greedy"
+            }
+        );
+
+        drawResults(poses);
+        requestAnimationFrame(renderLoop);
+    }
+
+    function drawResults(poses) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        let focusedCount = 0;
+        let total = 0;
+
+        poses.forEach(pose => {
+            if (pose.score < 0.30) return;
+            total++;
+
+            const nose = pose.keypoints.find(k => k.name === "nose");
+            const ls = pose.keypoints.find(k => k.name === "left_shoulder");
+            const rs = pose.keypoints.find(k => k.name === "right_shoulder");
+
+            let focused = false;
+
+            if (ls && rs && ls.score > 0.4 && rs.score > 0.4 && nose && nose.score > 0.4) {
+                const center = { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 };
+                const shoulderWidth = Math.abs(ls.x - rs.x);
+
+                const noseOffset = Math.abs(nose.x - center.x);
+                const allowedOffset = shoulderWidth * (0.5 - STRICTNESS_THRESHOLD * 0.4);
+
+                const headTilt = Math.abs(nose.y - center.y);
+
+                if (noseOffset < allowedOffset && headTilt < shoulderWidth * 1.2) {
+                    focused = true;
+                }
+            }
+
+            if (focused) focusedCount++;
+
+            // Draw visual cues
+            const color = focused ? "#059669" : "#dc2626";
+
+            if (nose) {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(nose.x, nose.y, 40, 0, 2 * Math.PI);
+                ctx.stroke();
+
+                ctx.fillStyle = color;
+                ctx.font = "bold 14px Arial";
+                ctx.fillText(focused ? "FOCUSED" : "DISTRACTED", nose.x - 30, nose.y - 50);
+            }
+
+            if (ls && rs) {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(ls.x, ls.y);
+                ctx.lineTo(rs.x, rs.y);
+                ctx.stroke();
+            }
+        });
+
+        // Update UI
+        countDisplay.innerText = total;
+
+        const rawPct = total > 0 ? (focusedCount / total) : 0;
+        smoothFocus = smoothFocus * (1 - ALPHA) + rawPct * ALPHA;
+        const pct = Math.round(smoothFocus * 100);
+
+        focusDisplay.innerText = pct + "%";
+
+        if (pct > 80) focusDisplay.className = "text-2xl font-bold focused-text";
+        else if (pct > 50) focusDisplay.className = "text-2xl font-bold warning-text";
+        else focusDisplay.className = "text-2xl font-bold danger-text";
+    }
+</script>
+
+</body>
+</html>
