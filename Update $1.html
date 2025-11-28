@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FOCUS AI: School Focus Detection</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+    <style>
+        /* ===== School Theme Styles (Existing) ===== */
+
+        body {
+            background-color: #f6f7fb;
+            color: #1e293b;
+            font-family: "Segoe UI", sans-serif;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border: 2px solid #d0d6e2;
+            border-radius: 6px;
+        }
+
+        input[type=range] {
+            accent-color: #2563eb;
+        }
+
+        /* Header - school blue */
+        .school-header {
+            background-color: #1e3a8a;
+            border-bottom: 3px solid #172554;
+        }
+
+        /* Main panels */
+        .hud-panel {
+            background: #ffffff;
+            border: 1px solid #d7dce3;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        }
+
+        /* Footer - school worksheet style */
+        .school-footer {
+            background-color: #e2e8f0;
+            color: #475569;
+        }
+
+        /* Loader */
+        #loader {
+            background: rgba(255,255,255,0.92);
+        }
+
+        #loader h2 { color: #1e3a8a; }
+        #loader p { color: #475569; }
+
+        /* Label Colors */
+        .focused-text { color: #059669 !important; }
+        .warning-text { color: #ca8a04 !important; }
+        .danger-text  { color: #dc2626 !important; }
+
+        /* ===== Logo Splash Screen Styles (NEW) ===== */
+        #splash-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000000; /* Match logo background */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100; /* Ensure it's on top of everything */
+            transition: opacity 0.5s ease-out;
+        }
+
+        #splash-screen.hidden {
+            opacity: 0;
+            pointer-events: none; /* Allows clicking through once hidden */
+        }
+        
+        #splash-screen img {
+            width: 100%;
+            max-width: 300px; /* Adjust size as needed */
+            height: auto;
+        }
+        
+        /* Recording Status Indicator (NEW) */
+        .recording-status {
+            animation: pulse-red 2s infinite;
+        }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(220, 38, 38, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+        }
+    </style>
+</head>
+
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <div id="splash-screen">
+        <img src="YOUR_LOGO_IMAGE_URL_OR_BASE64" alt="FOCUS AI Logo">
+    </div>
+
+    <div class="school-header p-4 flex flex-wrap justify-between items-center gap-4">
+        <div>
+            <h1 class="text-xl font-bold text-white tracking-widest">FOCUS<span class="text-yellow-300">AI</span></h1>
+            <p class="text-xs text-blue-200">School Activity Attention Tracking</p>
+        </div>
+
+        <div class="flex items-center gap-4 bg-white px-4 py-2 rounded-lg shadow hud-panel">
+            <label class="text-xs font-bold text-slate-700">STRICTNESS:</label>
+            <input id="sensitivity" type="range" min="10" max="90" value="50" class="w-32 h-1">
+            <span id="senseVal" class="text-xs font-mono text-blue-700">50%</span>
+        </div>
+
+        <div class="flex gap-6">
+            <div class="text-center">
+                <div class="text-[10px] text-blue-100 uppercase">Students</div>
+                <div id="countDisplay" class="text-2xl font-bold text-white leading-none">0</div>
+            </div>
+            <div class="text-center">
+                <div class="text-[10px] text-blue-100 uppercase">Focus Level</div>
+                <div id="focusDisplay" class="text-2xl font-bold text-white leading-none">--</div>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+             <div id="recordStatus" class="w-3 h-3 bg-red-600 rounded-full hidden"></div>
+             <p id="recordText" class="text-sm font-bold text-white hidden">RECORDING...</p>
+        </div>
+
+        <button id="initBtn"
+            onclick="initSystem()"
+            class="bg-yellow-400 hover:bg-yellow-300 text-black px-6 py-2 rounded font-bold text-sm transition shadow">
+            START SYSTEM
+        </button>
+    </div>
+
+    <div class="relative flex-1 bg-white w-full flex items-center justify-center overflow-hidden">
+        <video id="video" class="hidden" playsinline></video>
+        <canvas id="canvas"></canvas>
+
+        <div id="loader" class="absolute inset-0 flex flex-col items-center justify-center z-30 hidden">
+            <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <h2 class="text-xl font-bold">LOADING AI MODEL</h2>
+            <p class="text-sm mt-2">MoveNet Multi-Person Loading…</p>
+        </div>
+    </div>
+
+    <div class="school-footer p-2 text-[10px] flex justify-center gap-6 border-t border-slate-300">
+        <span class="flex items-center gap-1">
+            <div class="w-2 h-2 bg-green-500 rounded-full"></div> Focused
+        </span>
+        <span class="flex items-center gap-1">
+            <div class="w-2 h-2 bg-red-500 rounded-full"></div> Distracted
+        </span>
+    </div>
+
+    <script>
+        let detector;
+        let isRunning = false;
+        let isRecording = false; // NEW
+
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const loader = document.getElementById('loader');
+        const initBtn = document.getElementById('initBtn');
+        const splashScreen = document.getElementById('splash-screen'); // NEW
+        const recordStatus = document.getElementById('recordStatus'); // NEW
+        const recordText = document.getElementById('recordText'); // NEW
+
+        const countDisplay = document.getElementById('countDisplay');
+        const focusDisplay = document.getElementById('focusDisplay');
+        const senseSlider = document.getElementById('sensitivity');
+        const senseVal = document.getElementById('senseVal');
+
+        let STRICTNESS_THRESHOLD = 0.5;
+        senseSlider.oninput = (e) => {
+            STRICTNESS_THRESHOLD = e.target.value / 100;
+            senseVal.innerText = e.target.value + "%";
+        };
+
+        // --- Logo Pop-up Logic (NEW) ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // NOTE: The image src in the HTML must be updated to your logo file's URL or a Base64 string.
+            // For this demonstration, the image source is placeholder.
+            setTimeout(() => {
+                splashScreen.classList.add('hidden');
+            }, 3000); // Hide after 3 seconds
+            
+            // Start the daily recording process automatically
+            startDailyRecording();
+        });
+
+
+        // --- Conceptual Daily Video Recording System (NEW) ---
+        function startDailyRecording() {
+            console.log("Starting conceptual daily video recording system...");
+            isRecording = true;
+            recordStatus.classList.remove("hidden");
+            recordStatus.classList.add("recording-status");
+            recordText.classList.remove("hidden");
+            
+            // NOTE: This is where you would integrate an actual video recording
+            // solution. In a real-world application, this would involve:
+            // 1. Using MediaRecorder API (browser-based) or a dedicated
+            //    server/software (for CCTV replacement).
+            // 2. Setting up a cron job or scheduled task to start/stop recording
+            //    daily (e.g., 8:00 AM to 4:00 PM).
+            // 3. Saving the recorded video file (or stream) to local storage
+            //    or a cloud server for daily archiving (e.g., 'videos/2025-11-28.webm').
+            
+            // Since this is a simple HTML/JS demo, we only update the status display.
+        }
+        // --------------------------------------------------------
+
+
+        async function initSystem() {
+            if (isRunning) return;
+            initBtn.disabled = true;
+            loader.classList.remove("hidden");
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 1280, height: 720, facingMode: 'user' }
+                });
+
+                video.srcObject = stream;
+                await new Promise(res => video.onloadedmetadata = res);
+                video.play();
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+
+                detector = await poseDetection.createDetector(
+                    poseDetection.SupportedModels.MoveNet,
+                    {
+                        modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
+                        enableSmoothing: true,
+                        minPoseScore: 0.25
+                    }
+                );
+
+                loader.classList.add("hidden");
+                initBtn.innerText = "SCANNING...";
+                initBtn.classList.replace("bg-yellow-400", "bg-green-500");
+                isRunning = true;
+
+                renderLoop();
+
+            } catch (err) {
+                alert("Error starting webcam or AI: " + err.message);
+                loader.classList.add("hidden");
+                initBtn.disabled = false;
+            }
+        }
+
+        async function renderLoop() {
+            if (!isRunning) return;
+
+            const poses = await detector.estimatePoses(video, {
+                maxPoses: 20,
+                flipHorizontal: false
+            });
+
+            drawResults(poses);
+            requestAnimationFrame(renderLoop);
+        }
+
+        function drawResults(poses) {
+            // Draw a slightly transparent version of the video to allow the overlay to be visible
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "rgba(255,255,255,0.4)";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            let focusedCount = 0;
+            let total = 0;
+
+            poses.forEach(pose => {
+                if (pose.score < 0.25) return;
+                total++;
+
+                const nose = pose.keypoints.find(k => k.name === "nose");
+                const ls = pose.keypoints.find(k => k.name === "left_shoulder");
+                const rs = pose.keypoints.find(k => k.name === "right_shoulder");
+
+                let focused = false;
+
+                if (ls && rs && ls.score > 0.3 && rs.score > 0.3) {
+                    const center = (ls.x + rs.x) / 2;
+                    const width = Math.abs(ls.x - rs.x);
+
+                    if (nose && nose.score > 0.3) {
+                        // Check if the nose is within the allowed offset from the center of the shoulders
+                        const offset = Math.abs(nose.x - center);
+                        const allowed = width * (1 - STRICTNESS_THRESHOLD);
+                        if (offset < allowed) focused = true;
+                    }
+                }
+
+                if (focused) focusedCount++;
+
+                const color = focused ? "#059669" : "#dc2626";
+
+                if (nose) {
+                    // Draw the circle around the head (using nose as anchor)
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(nose.x, nose.y, 40, 0, 2 * Math.PI);
+                    ctx.stroke();
+
+                    // Draw the focus label
+                    ctx.fillStyle = color;
+                    ctx.font = "bold 14px Arial";
+                    ctx.fillText(focused ? "FOCUSED" : "DISTRACTED", nose.x - 30, nose.y - 50);
+                }
+
+                if (ls && rs) {
+                    // Draw the line connecting shoulders
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 4;
+                    ctx.beginPath();
+                    ctx.moveTo(ls.x, ls.y);
+                    ctx.lineTo(rs.x, rs.y);
+                    ctx.stroke();
+                }
+            });
+
+            // Update Header Display
+            countDisplay.innerText = total;
+
+            const pct = total > 0 ? Math.round((focusedCount / total) * 100) : 0;
+            focusDisplay.innerText = pct + "%";
+
+            // Update Focus Level Color
+            if (pct > 80) focusDisplay.className = "text-2xl font-bold focused-text";
+            else if (pct > 50) focusDisplay.className = "text-2xl font-bold warning-text";
+            else focusDisplay.className = "text-2xl font-bold danger-text";
+        }
+    </script>
+
+</body>
+</html>
