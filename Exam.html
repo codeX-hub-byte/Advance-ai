@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FOCUSAI: Classroom Monitoring</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- TensorFlow + MoveNet -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+<!-- face-api.js for face recognition -->
+<script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<style>
+body{font-family:Inter,sans-serif;background:#f6f7fb;color:#0f172a}canvas{border-radius:6px;border:2px solid #dbeafe} .badge{padding:6px 10px;border-radius:999px;font-weight:600} .modal{background: rgba(0,0,0,0.5);position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+</style>
+</head>
+<body class="h-screen flex flex-col">
+
+<!-- Header -->
+<header class="bg-sky-900 text-white p-4 flex items-center justify-between">
+<div>
+<h1 class="text-lg font-bold">FOCUS<span class="text-yellow-300">AI</span> — Classroom Monitor</h1>
+<div class="text-xs text-blue-200">MoveNet + face-api.js • Focus & Cheating Alerts</div>
+</div>
+<div class="flex items-center gap-3">
+<div class="bg-white text-sky-900 px-3 py-1 rounded hud-panel">
+Strictness <input id="sensitivity" type="range" min="10" max="90" value="50" class="mx-2" /> <span id="senseVal">50%</span>
+</div>
+<button id="initBtn" class="bg-yellow-400 px-4 py-2 rounded font-bold">START</button>
+</div>
+</header>
+
+<!-- Main -->
+<main class="flex-1 p-4 grid grid-cols-3 gap-4">
+<!-- Video & Canvas -->
+<section class="col-span-2 bg-white p-3 rounded shadow flex flex-col">
+<div class="flex justify-between items-center mb-2">
+<div class="flex items-center gap-2">
+<div class="w-3 h-3 bg-green-500 rounded-full"></div> Focused
+<div class="w-3 h-3 bg-red-500 ml-3 rounded-full"></div> Distracted
+</div>
+<div>
+<button id="popupTest" class="bg-sky-600 text-white px-3 py-1 rounded">Test Alert</button>
+</div>
+</div>
+
+<div class="relative flex-1 flex items-center justify-center">
+<video id="video" playsinline class="hidden"></video>
+<canvas id="canvas" width="1280" height="720"></canvas>
+
+<div id="splash" class="absolute inset-0 flex items-center justify-center bg-white z-30">
+<div class="text-center">
+<img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><rect rx='12' width='100%25' height='100%25' fill='%230f172a'/><text x='50%25' y='55%25' font-size='20' font-family='Arial' fill='%23ffd166' text-anchor='middle'>FOCUSAI</text></svg>" alt="logo" />
+<div class="mt-3 text-sm text-slate-600">Loading models…</div>
+</div>
+</div>
+</div>
+
+<div class="mt-3 flex justify-between text-sm">
+<div>Students detected: <span id="countDisplay" class="font-bold">0</span></div>
+<div>Focus overall: <span id="focusDisplay" class="font-bold">--</span></div>
+<div>Recording: <span id="recStatus" class="font-bold">OFF</span></div>
+</div>
+</section>
+
+<!-- Controls & Attendance -->
+<aside class="bg-white p-3 rounded shadow flex flex-col gap-3">
+<div>
+<h3 class="font-semibold">Attendance</h3>
+<div class="text-xs text-slate-500">Enroll student faces (name + image) — stored locally</div>
+</div>
+
+<div class="grid gap-2">
+<input id="stuName" placeholder="Student name" class="border px-2 py-1 rounded" />
+<input id="stuImg" type="file" accept="image/*" class="text-sm" />
+<button id="enrollBtn" class="bg-green-500 text-white px-3 py-1 rounded">Enroll</button>
+</div>
+
+<div>
+<h4 class="font-semibold mt-2">Enrolled</h4>
+<ul id="enrolledList" class="text-sm max-h-40 overflow-auto"></ul>
+</div>
+
+<div>
+<h4 class="font-semibold mt-2">Attendance Log</h4>
+<ul id="attendanceLog" class="text-sm max-h-36 overflow-auto"></ul>
+</div>
+
+<div class="mt-auto">
+<h4 class="font-semibold">Recording / Download</h4>
+<div class="flex gap-2 mt-2">
+<button id="startRec" class="bg-indigo-600 text-white px-3 py-1 rounded">Start Rec</button>
+<button id="stopRec" class="bg-red-600 text-white px-3 py-1 rounded">Stop Rec</button>
+<button id="saveDaily" class="bg-emerald-600 text-white px-3 py-1 rounded">Save Today</button>
+</div>
+<div class="text-xs text-slate-500 mt-2">Note: browser auto-downloads recording daily.</div>
+</div>
+</aside>
+</main>
+
+<!-- Popup alert -->
+<div id="modal" class="modal hidden">
+<div class="bg-white p-4 rounded shadow text-center w-96">
+<h3 id="modalTitle" class="font-bold text-lg">ALERT</h3>
+<p id="modalBody" class="mt-2 text-sm"></p>
+<div class="mt-4"><button id="modalClose" class="px-3 py-1 bg-sky-700 text-white rounded">Acknowledge</button></div>
+</div>
+</div>
+
+<script>
+let detector, isRunning=false;
+const video=document.getElementById('video'), canvas=document.getElementById('canvas'), ctx=canvas.getContext('2d');
+const loader=document.getElementById('splash'), initBtn=document.getElementById('initBtn');
+const countDisplay=document.getElementById('countDisplay'), focusDisplay=document.getElementById('focusDisplay');
+const senseSlider=document.getElementById('sensitivity'), senseVal=document.getElementById('senseVal');
+const popupTest=document.getElementById('popupTest'), modal=document.getElementById('modal');
+const modalTitle=document.getElementById('modalTitle'), modalBody=document.getElementById('modalBody'), modalClose=document.getElementById('modalClose');
+const enrollBtn=document.getElementById('enrollBtn'), stuName=document.getElementById('stuName'), stuImg=document.getElementById('stuImg');
+const enrolledList=document.getElementById('enrolledList'), attendanceLog=document.getElementById('attendanceLog');
+const startRecBtn=document.getElementById('startRec'), stopRecBtn=document.getElementById('stopRec'), saveDailyBtn=document.getElementById('saveDaily'), recStatus=document.getElementById('recStatus');
+
+let STRICTNESS_THRESHOLD=0.5; senseSlider.oninput=e=>{STRICTNESS_THRESHOLD=e.target.value/100;senseVal.innerText=e.target.value+'%'}
+
+let mediaRecorder, recordedChunks=[], recordingStream=null;
+startRecBtn.onclick=async()=>{
+if(mediaRecorder&&mediaRecorder.state==='recording')return alert('Already recording');
+try{
+const canvasStream=canvas.captureStream(25);
+let micStream=null; try{micStream=await navigator.mediaDevices.getUserMedia({audio:true})}catch(e){micStream=null}
+if(micStream){recordingStream=new MediaStream([...canvasStream.getVideoTracks(),...micStream.getAudioTracks()])}else recordingStream=canvasStream;
+mediaRecorder=new MediaRecorder(recordingStream,{mimeType:'video/webm;codecs=vp9,opus'});
+recordedChunks=[]; mediaRecorder.ondataavailable=e=>{if(e.data.size>0)recordedChunks.push(e.data)};
+mediaRecorder.onstop=()=>recStatus.innerText='OFF';
+mediaRecorder.start(); recStatus.innerText='ON';
+}catch(err){alert('Recording failed: '+err.message)}
+}
+
+stopRecBtn.onclick=()=>{if(mediaRecorder&&mediaRecorder.state==='recording')mediaRecorder.stop()}
+
+async function saveRecordingAs(filename){
+if(!recordedChunks||recordedChunks.length===0)return alert('No recording data');
+const blob=new Blob(recordedChunks,{type:'video/webm'});
+const defaultName=filename||('focusai_'+new Date().toISOString().slice(0,10)+'.webm');
+const url=URL.createObjectURL(blob);
+const a=document.createElement('a');a.href=url;a.download=defaultName;a.click();URL.revokeObjectURL(url);
+}
+saveDailyBtn.onclick=()=>saveRecordingAs();
+
+function showAlert(title,body){modalTitle.innerText=title; modalBody.innerText=body; modal.classList.remove('hidden')}
+modalClose.onclick=()=>modal.classList.add('hidden')
+popupTest.onclick=()=>showAlert('Cheating detected','Test alert: student looking away')
+
+const LS_KEY='focusai_enrolled';
+let labeledDescriptors=[]; // name + descriptors
+
+async function loadEnrolledFromStorage(){
+const raw=localStorage.getItem(LS_KEY);
+if(!raw)return;
+const parsed=JSON.parse(raw);
+labeledDescriptors=parsed.map(p=>({name:p.name, descriptors:p.descriptors.map(d=>new Float32Array(Object.values(d)))}));
+renderEnrolled();
+}
+
+function saveEnrolledToStorage(){
+const out=labeledDescriptors.map(l=>({name:l.name, descriptors:l.descriptors.map(d=>Array.from(d))}));
+localStorage.setItem(LS_KEY,JSON.stringify(out));
+}
+
+function renderEnrolled(){
+enrolledList.innerHTML='';
+labeledDescriptors.forEach((l,idx)=>{
+const li=document.createElement('li');li.className='flex justify-between items-center gap-2 py-1';
+li.innerHTML=`<span>${l.name}</span><button data-i='${idx}' class='text-xs px-2 py-1 bg-red-200 rounded'>Remove</button>`;
+enrolledList.appendChild(li);
+})
+enrolledList.querySelectorAll('button').forEach(btn=>btn.onclick=e=>{const i=+e.target.dataset.i;labeledDescriptors.splice(i,1); saveEnrolledToStorage(); renderEnrolled();})
+}
+
+enrollBtn.onclick=async()=>{
+const name=(stuName.value||'').trim(); const file=stuImg.files && stuImg.files[0];
+if(!name||!file)return alert('Provide name and image');
+const img=await faceapi.bufferToImage(file);
+const det=await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
+if(!det)return alert('No face found'); const desc=det.descriptor;
+const entry=labeledDescriptors.find(l=>l.name===name);
+if(entry)entry.descriptors.push(desc); else labeledDescriptors.push({name,descriptors:[desc]});
+saveEnrolledToStorage(); renderEnrolled(); alert('Enrolled '+name); stuName.value=''; stuImg.value='';
+}
+
+function logAttendance(name){
+const li=document.createElement('li'); li.className='py-1 border-b';
+li.innerText=`${new Date().toLocaleString()} — ${name}`; attendanceLog.prepend(li);
+}
+
+async function initModels(){
+loader.classList.remove('hidden');
+await faceapi.nets.tinyFaceDetector.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights');
+await faceapi.nets.faceLandmark68TinyNet.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights');
+await faceapi.nets.faceRecognitionNet.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights');
+detector=await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet,{modelType:poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING});
+loader.classList.add('hidden');
+}
+
+async function startCamera(){
+const stream=await navigator.mediaDevices.getUserMedia({video:{width:1280,height:720,facingMode:'user'},audio:false});
+video.srcObject=stream; await video.play(); canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+}
+
+function matchDescriptor(queryDesc,maxDistance=0.5){
+let best={name:null,dist:Infinity};
+labeledDescriptors.forEach(l=>{
+l.descriptors.forEach(d=>{
+let sum=0;for(let i=0;i<d.length;i++){const diff=d[i]-queryDesc[i]; sum+=diff*diff}
+const dist=Math.sqrt(sum); if(dist<best.dist)best={name:l.name,dist}
+})
+})
+if(best.dist<=maxDistance)return best; return null;
+}
+
+let lastAlertTimes={};
+
+async function renderLoop(){
+if(!isRunning)return;
+const poses=await detector.estimatePoses(video,{maxPoses:20,flipHorizontal:false});
+ctx.drawImage(video,0,0,canvas.width,canvas.height);
+ctx.fillStyle='rgba(255,255,255,0.08)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+let total=0, focusedCount=0;
+const faces=await faceapi.detectAllFaces(canvas,new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks(true).withFaceDescriptors();
+if(faces&&faces.length>0){faces.forEach(f=>{
+const {x,y,width,height}=f.detection.box; ctx.strokeStyle='#0ea5e9'; ctx.lineWidth=2; ctx.strokeRect(x,y,width,height);
+const match=matchDescriptor(f.descriptor,0.45); const label=match?`${match.name} (${match.dist.toFixed(2)})`:'Unknown';
+ctx.fillStyle='rgba(15,23,42,0.8)'; ctx.fillRect(x,y-18,ctx.measureText(label).width+12,18); ctx.fillStyle='white'; ctx.fillText(label,x+6,y-4);
+if(match){const key=match.name;if(!lastAlertTimes[key])lastAlertTimes[key]=0; if(Date.now()-lastAlertTimes[key]>5*60*1000){logAttendance(match.name); lastAlertTimes[key]=Date.now();}}})}
+
+for(const pose of poses){if(pose.score<0.25)continue; total++;
+const nose=pose.keypoints.find(k=>k.name==='nose'); const ls=pose.keypoints.find(k=>k.name==='left_shoulder'); const rs=pose.keypoints.find(k=>k.name==='right_shoulder'); const lw=pose.keypoints.find(k=>k.name==='left_wrist'); const rw=pose.keypoints.find(k=>k.name==='right_wrist');
+let focused=false; if(ls&&rs&&nose){const center=(ls.x+rs.x)/2; const width=Math.abs(ls.x-rs.x); const offset=Math.abs(nose.x-center); const allowed=width*(1-STRICTNESS_THRESHOLD); if(offset<allowed&&nose.y<ls.y+width*0.8)focused=true;}
+if(focused)focusedCount++;
+ctx.strokeStyle=focused?'#059669':'#dc2626'; ctx.lineWidth=3;
+if(nose){ctx.beginPath();ctx.arc(nose.x,nose.y,28,0,2*Math.PI); ctx.stroke(); ctx.fillText(focused?'FOCUSED':'DISTRACTED',nose.x-28,nose.y-36)}
+if(ls&&rs){ctx.beginPath();ctx.moveTo(ls.x,ls.y); ctx.lineTo(rs.x,rs.y); ctx.stroke();}
+
+const now=Date.now(); const personId=Math.round((pose.keypoints[0].x+pose.keypoints[0].y));
+
+if(ls&&rs&&nose){if(Math.abs(nose.x-(ls.x+rs.x)/2)>Math.abs(ls.x-rs.x)*0.9)throttleAlert(personId+'_away',7000,()=>showAlert('Looking away','Student is looking away'))}
+if(nose&&ls&&rs){const shoulderY=Math.min(ls.y,rs.y); if(nose.y>shoulderY+80)throttleAlert(personId+'_bent',7000,()=>showAlert('Bending down','Student may be looking under desk'))}
+if(!lw&&!rw){throttleAlert(personId+'_handsHidden',10000,()=>showAlert('Hands not visible','Please keep hands on desk'))}
+else{const shoulderY=(ls&&rs)?Math.min(ls.y,rs.y):null; if(shoulderY&&((lw&&lw.y>shoulderY+120)||(rw&&rw.y>shoulderY+120)))throttleAlert(personId+'_handsLow',10000,()=>showAlert('Hands hidden/low','Hands appear hidden'))}
+
+if(poses.length>1){throttleAlert('multi_person',15000,()=>showAlert('Multiple persons','More than one person detected'))}
+
+}
+
+countDisplay.innerText=total;
+const pct=total>0?Math.round((focusedCount/total)*100):0;
+focusDisplay.innerText=pct+'%';
+if(pct>80)focusDisplay.className='badge text-white bg-green-500';
+else if(pct>50)focusDisplay.className='badge text-white bg-yellow-500';
+else focusDisplay.className='badge text-white bg-red-600';
+
+requestAnimationFrame(renderLoop);
+}
+
+function throttleAlert(key,cooldownMs,cb){const now=Date.now(); if(!lastAlertTimes[key]||now-lastAlertTimes[key]>cooldownMs){lastAlertTimes[key]=now;cb();}}
+
+initBtn.onclick=async()=>{
+if(isRunning)return;
+initBtn.disabled=true; initBtn.innerText='Initializing…';
+await Promise.all([initModels(), loadEnrolledFromStorage(), startCamera()]);
+isRunning=true; initBtn.innerText='RUNNING'; initBtn.classList.remove('bg-yellow-400'); initBtn.classList.add('bg-green-600');
+ctx.font='14px Arial'; ctx.fillStyle='white'; ctx.textBaseline='top';
